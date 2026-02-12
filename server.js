@@ -1,10 +1,55 @@
+
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// --- Server status and error logging ---
+const logsDir = path.join(__dirname, 'logs');
+if (!fs.existsSync(logsDir)) {
+  fs.mkdirSync(logsDir, { recursive: true });
+}
+const statusLogPath = path.join(logsDir, 'server-status.log');
+function logServerStatus(message) {
+  const timestamp = new Date().toISOString();
+  fs.appendFileSync(statusLogPath, `[${timestamp}] ${message}\n`);
+}
+
+// In-memory PDF generation endpoint (example using pdf-lib)
+import { PDFDocument, rgb } from 'pdf-lib';
+// ...existing code...
+// Example function to generate a simple PDF in memory
+async function generatePdfForMember(member) {
+  // Create a new PDFDocument
+  const pdfDoc = await PDFDocument.create();
+  const page = pdfDoc.addPage([350, 200]);
+  page.drawText(`Member Name: ${member?.first_name || 'N/A'}`);
+  page.drawText(`Membership ID: ${member?.membership_id || 'N/A'}`, { y: 160 });
+  // Add more drawing logic as needed
+  const pdfBytes = await pdfDoc.save();
+  return Buffer.from(pdfBytes);
+}
+
+// POST /generate-pdf: Generate PDF in memory and stream to client
+app.post('/generate-pdf', express.json(), async (req, res) => {
+  try {
+    const member = req.body.member;
+    if (!member) return res.status(400).json({ error: 'member data required' });
+    const pdfBuffer = await generatePdfForMember(member);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="card.pdf"');
+    res.send(pdfBuffer);
+  } catch (err) {
+    console.error('PDF generation error:', err);
+    res.status(500).json({ error: 'Failed to generate PDF' });
+  }
+});
+
 import dotenv from 'dotenv';
 import express from 'express';
 import multer from 'multer';
 import cors from 'cors';
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
 import TemplateManager from './server/templateManager.js';
 import { logInfo, logError, logWarn } from './server/logger.js';
 import { sendRegistrationEmail, sendApprovalEmail } from './server/emailService.js';
@@ -12,16 +57,13 @@ import { sendRegistrationEmail, sendApprovalEmail } from './server/emailService.
 // Load environment variables from .env file
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Initialize Template Manager
 const storageDir = path.join(__dirname, 'storage');
 const templateManager = new TemplateManager(storageDir);
-
+app.use(cors());
 // Enable CORS
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -262,7 +304,8 @@ app.post('/webhook', express.json(), (req, res) => {
 app.post('/upload-card', cardUpload.single('card'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No card uploaded' });
-    const fileUrl = `http://localhost:${PORT}/uploads/${req.file.filename}`;
+    const baseUrl = process.env.API_URL || `http://localhost:${PORT}`;
+    const fileUrl = `${baseUrl}/uploads/${req.file.filename}`;
     return res.json({ url: fileUrl });
   } catch (err) {
     console.error('upload-card error', err);
@@ -355,7 +398,7 @@ app.post('/whatsapp/notify-approval', express.json(), async (req, res) => {
 app.get('/admin/settings', (req, res) => {
   try {
     const settingsPath = path.join(__dirname, 'storage', 'whatsapp_settings.json');
-      let settings = { whatsapp_enabled: true, downloads_per_week: 1 };
+    let settings = { whatsapp_enabled: true, downloads_per_week: 1, registration_enabled: true };
     if (fs.existsSync(settingsPath)) {
       try {
         const raw = fs.readFileSync(settingsPath, 'utf8');
@@ -364,6 +407,7 @@ app.get('/admin/settings', (req, res) => {
         console.warn('Failed to parse whatsapp_settings.json, using defaults', e);
       }
     }
+    if (typeof settings.registration_enabled !== 'boolean') settings.registration_enabled = true;
     res.json({ success: true, settings });
   } catch (err) {
     console.error('get settings error', err);
@@ -373,11 +417,12 @@ app.get('/admin/settings', (req, res) => {
 
 app.post('/admin/settings', express.json(), (req, res) => {
   try {
-    const { whatsapp_enabled, downloads_per_week } = req.body || {};
+    const { whatsapp_enabled, downloads_per_week, registration_enabled } = req.body || {};
     const settingsPath = path.join(__dirname, 'storage', 'whatsapp_settings.json');
     const settings = {
       whatsapp_enabled: !!whatsapp_enabled,
-      downloads_per_week: typeof downloads_per_week === 'number' ? downloads_per_week : parseInt(downloads_per_week, 10) || 1
+      downloads_per_week: typeof downloads_per_week === 'number' ? downloads_per_week : parseInt(downloads_per_week, 10) || 1,
+      registration_enabled: typeof registration_enabled === 'boolean' ? registration_enabled : true
     };
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
     res.json({ success: true, settings });
@@ -658,9 +703,9 @@ app.post('/upload', upload.single('photo'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
-
   // Return the URL to access the file
-  const fileUrl = `http://localhost:${PORT}/uploads/${req.file.filename}`;
+  const baseUrl = process.env.API_URL || `http://localhost:${PORT}`;
+  const fileUrl = `${baseUrl}/uploads/${req.file.filename}`;
   res.json({ url: fileUrl });
 });
 
@@ -674,9 +719,9 @@ app.post('/upload-template', pdfUpload.single('template'), (req, res) => {
     console.log('No file uploaded');
     return res.status(400).json({ error: 'No PDF file uploaded' });
   }
-
   // Return the URL to access the PDF
-  const fileUrl = `http://localhost:${PORT}/get-pdf-template`;
+  const baseUrl = process.env.API_URL || `http://localhost:${PORT}`;
+  const fileUrl = `${baseUrl}/get-pdf-template`;
   console.log('File uploaded successfully:', fileUrl);
   res.json({ url: fileUrl });
 });
@@ -725,13 +770,24 @@ app.get('/load-template', (req, res) => {
 });
 
 // Serve uploaded files
+// Add CORS headers for uploads before serving static files
+app.use('/uploads', (req, res, next) => {
+  // Allow only the production frontend origin for CORS
+  res.header('Access-Control-Allow-Origin', 'https://join.mslpakistan.org');
+  res.header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
 app.use('/uploads', express.static(uploadsDir));
 
 // Serve template files
 app.use('/templates', express.static(path.join(__dirname, 'storage', 'template')));
 
 // Serve font files for pdfme
-const fontsDir = path.join(__dirname, 'storage', 'fonts');
+const fontsDir = path.join(__dirname, 'public', 'fonts');
 console.log('Fonts directory path:', fontsDir);
 console.log('Fonts directory exists:', fs.existsSync(fontsDir));
 if (fs.existsSync(fontsDir)) {
@@ -758,8 +814,15 @@ app.use('/fonts', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  // Set correct Content-Type for common font extensions
   if (req.path.endsWith('.ttf')) {
-    res.setHeader('Content-Type', 'application/x-font-ttf');
+    res.setHeader('Content-Type', 'font/ttf');
+  } else if (req.path.endsWith('.otf')) {
+    res.setHeader('Content-Type', 'font/otf');
+  } else if (req.path.endsWith('.woff')) {
+    res.setHeader('Content-Type', 'font/woff');
+  } else if (req.path.endsWith('.woff2')) {
+    res.setHeader('Content-Type', 'font/woff2');
   }
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
@@ -782,13 +845,31 @@ app.get('/get-pdf-template', (req, res) => {
   }
 });
 
+
 try {
   app.listen(PORT, () => {
-    logInfo(`🚀 Server running on http://localhost:${PORT}`);
+    const msg = `🚀 Server running on http://localhost:${PORT}`;
+    logInfo(msg);
+    logServerStatus(msg);
   });
 } catch (err) {
-  console.error('Failed to start server:', err);
+  const errMsg = `Failed to start server: ${err && err.message ? err.message : err}`;
+  console.error(errMsg);
+  logServerStatus(errMsg);
 }
+
+// Log uncaught exceptions and unhandled rejections to server-status.log
+process.on('uncaughtException', (err) => {
+  const msg = `Uncaught exception: ${err && err.stack ? err.stack : err}`;
+  console.error(msg);
+  logServerStatus(msg);
+});
+
+process.on('unhandledRejection', (reason) => {
+  const msg = `Unhandled rejection: ${reason}`;
+  console.error(msg);
+  logServerStatus(msg);
+});
 
 async function sendWhatsAppTemplate(phone, templateName, languageCode = 'en', parameters = [], buttonParam = null, buttonType = 'url') {
   if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
